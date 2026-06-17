@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "D:\Trae_project\BELKA\main.py", line 26, in <module>
+    from src.pipeline import BELKAPipeline
+  File "D:\Trae_project\BELKA\src\pipeline.py", line 49, in <module>
+    from .featurizer import MolecularFeaturizer
+  File "D:\Trae_project\BELKA\src\featurizer.py", line 22, in <module>
+    from rdkit import Chem
+ModuleNotFoundError: No module named 'rdkit'

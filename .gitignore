@@ -1,0 +1,32 @@
+# ========== 数据文件 ==========
+data/
+output/
+
+# ========== Python ==========
+__pycache__/
+*.py[cod]
+*.pyc
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ========== 环境 ==========
+.env
+.venv
+venv/
+env/
+conda/
+
+# ========== IDE ==========
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ========== Jupyter ==========
+.ipynb_checkpoints/
+
+# ========== 项目压缩包 ==========
+BELKA_Kaggle3.zip
+*.zip

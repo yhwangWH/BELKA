@@ -1,0 +1,42 @@
+# ============================================================================
+# BELKA 比赛第一阶段 Conda 环境配置
+# 使用方法: conda env create -f environment.yml
+# 激活环境: conda activate belka
+# ============================================================================
+
+name: belka
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  # ---------- 核心语言 ----------
+  - python=3.11
+
+  # ---------- 数据处理 ----------
+  - numpy=1.26  # 必须 < 2, rdkit-pypi 需要 NumPy 1.x ABI
+  - pandas=2.2
+  - pyarrow=16.0          # Parquet 格式读写
+
+  # ---------- 化学信息学 ----------
+  - rdkit=2024.03         # SMILES 解析 / 分子指纹
+
+  # ---------- 机器学习 ----------
+  - scikit-learn=1.5
+  - lightgbm=4.5
+  - xgboost=2.1
+
+  # ---------- 超参数优化 ----------
+  - optuna=4.0
+
+  # ---------- 可视化 & 工具 ----------
+  - matplotlib=3.9
+  - seaborn=0.13
+  - tqdm=4.66
+  - joblib=1.4
+  - jupyterlab=4.2
+
+  # ---------- 通过 pip 安装的包 ----------
+  - pip
+  - pip:
+      - molvs==0.1.1       # SMILES 标准化/验证
