@@ -64,7 +64,7 @@ def create_submission(
     test_preds = clip_predictions(test_preds)
 
     # 读取官方模板确保 id 顺序完全一致
-    sample_sub = pd.read_csv(sample_sub_path)
+    sample_sub = pd.read_csv(sample_sub_path, dtype={"id": "int32", "binds": "float32"})
     expected_n = len(sample_sub)
 
     if len(test_preds) != expected_n:
@@ -72,8 +72,8 @@ def create_submission(
             f"预测数量 ({len(test_preds)}) 与模板行数 ({expected_n}) 不匹配!"
         )
 
-    # 创建提交文件
-    submission = sample_sub.copy()
+    # 直接在模板上赋值 (无需 .copy(), 模板读取后不再复用)
+    submission = sample_sub
     submission["binds"] = test_preds
 
     # 保存
@@ -110,7 +110,8 @@ def collect_oof_predictions(
     oof_df : pd.DataFrame
         增加 "oof_pred" 列的数据框.
     """
-    oof_df = df_oof.copy()
+    # 直接修改传入 DataFrame (调用方随后会释放它, 无需 .copy())
+    oof_df = df_oof
     oof_df["oof_pred"] = np.nan
 
     for fp in fold_predictions:

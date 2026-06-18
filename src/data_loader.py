@@ -71,7 +71,7 @@ def load_train_data(
     df = pd.read_parquet(filepath, columns=columns)
 
     if nrows is not None:
-        df = df.iloc[:nrows].copy()
+        df = df.iloc[:nrows]  # iloc 已返回副本, 无需 .copy()
         print(f"  只加载了前 {nrows} 行 (快速测试模式)")
 
     # 内存优化
@@ -113,7 +113,7 @@ def load_test_data(
     df = pd.read_parquet(filepath, columns=columns)
 
     if nrows is not None:
-        df = df.iloc[:nrows].copy()
+        df = df.iloc[:nrows]  # iloc 已返回副本, 无需 .copy()
         print(f"  只加载了前 {nrows} 行 (快速测试模式)")
 
     # 测试集也需要内存优化
@@ -288,8 +288,9 @@ def load_and_sample_train_chunked(
         df_chunk = _optimize_dtypes(df_chunk, convert_strings=False)
 
         pos_mask = df_chunk["binds"] == 1
-        df_pos = df_chunk[pos_mask].copy()
-        df_neg = df_chunk[~pos_mask].copy()
+        # 布尔索引已返回副本, 无需 .copy()
+        df_pos = df_chunk[pos_mask]
+        df_neg = df_chunk[~pos_mask]
 
         n_chunk_pos = len(df_pos)
         n_chunk_neg = len(df_neg)
@@ -304,11 +305,16 @@ def load_and_sample_train_chunked(
                 neg_chunks.append(df_neg)
             else:
                 chosen = rng.choice(n_chunk_neg, size=target_neg, replace=False)
-                neg_chunks.append(df_neg.iloc[chosen].copy())
-                del df_neg
+                neg_chunks.append(df_neg.iloc[chosen])  # iloc 整数索引已返回副本
+                del df_neg  # 释放未选中的负样本
                 gc.collect()
 
+        # 释放块内临时变量 (df_neg 可能已被 del, 用 try)
         del df_chunk, df_pos
+        try:
+            del df_neg
+        except NameError:
+            pass
         gc.collect()
         n_processed += batch.num_rows
 
@@ -389,7 +395,7 @@ def _cap_positives_per_protein(
             sub = sub.sample(n=max_per_protein, random_state=random_state)
         if len(sub) > 0:
             capped.append(sub)
-    result = pd.concat(capped, axis=0, ignore_index=True) if capped else df.iloc[:0].copy()
+    result = pd.concat(capped, axis=0, ignore_index=True) if capped else df.iloc[:0]
     del capped
     gc.collect()
     return result

@@ -625,22 +625,22 @@ class MolecularFeaturizer:
         physchem : np.ndarray, shape (n_samples, n_properties)
             理化性质矩阵 (float32).
         """
-        # 计算函数映射表
-        _PROPERTY_FUNCTIONS = {
-            "MolWt": lambda m: Descriptors.MolWt(m),
-            "LogP": lambda m: Crippen.MolLogP(m),
-            "NumHAcceptors": lambda m: Lipinski.NumHAcceptors(m),
-            "NumHDonors": lambda m: Lipinski.NumHDonors(m),
-            "NumRotatableBonds": lambda m: Lipinski.NumRotatableBonds(m),
-            "TPSA": lambda m: rdMolDescriptors.CalcTPSA(m),
-            "FractionCsp3": lambda m: rdMolDescriptors.CalcFractionCSP3(m),
-            "NumAromaticRings": lambda m: rdMolDescriptors.CalcNumAromaticRings(m),
-            "NumSaturatedRings": lambda m: rdMolDescriptors.CalcNumSaturatedRings(m),
-            "NumAliphaticRings": lambda m: rdMolDescriptors.CalcNumAliphaticRings(m),
-        }
+        # 计算函数列表 (按 PHYSICOCHEM_FEATURES 顺序, 直接引用避免 lambda 间接调用)
+        _PROPERTY_FNS = [
+            Descriptors.MolWt,
+            Crippen.MolLogP,
+            Lipinski.NumHAcceptors,
+            Lipinski.NumHDonors,
+            Lipinski.NumRotatableBonds,
+            rdMolDescriptors.CalcTPSA,
+            rdMolDescriptors.CalcFractionCSP3,
+            rdMolDescriptors.CalcNumAromaticRings,
+            rdMolDescriptors.CalcNumSaturatedRings,
+            rdMolDescriptors.CalcNumAliphaticRings,
+        ]
 
         n_samples = len(df)
-        n_props = len(PHYSICOCHEM_FEATURES)
+        n_props = len(_PROPERTY_FNS)
         physchem = np.zeros((n_samples, n_props), dtype=np.float32)
 
         report_interval = max(50000, n_samples // 20)  # 至少每5%打印一次
@@ -650,15 +650,12 @@ class MolecularFeaturizer:
             mol = self._smiles_to_mol(smiles)
 
             if mol is not None:
-                for j, prop_name in enumerate(PHYSICOCHEM_FEATURES):
+                for j, fn in enumerate(_PROPERTY_FNS):
                     try:
-                        fn = _PROPERTY_FUNCTIONS.get(prop_name)
-                        if fn is not None:
-                            val = fn(mol)
-                            physchem[i, j] = float(val) if val is not None else 0.0
+                        val = fn(mol)
+                        physchem[i, j] = float(val) if val is not None else 0.0
                     except Exception:
-                        # 某些描述符可能在特定分子上计算失败, 填 0
-                        pass
+                        pass  # 某些描述符可能在特定分子上计算失败, 填 0
 
             # 进度输出
             if (i + 1) % report_interval == 0:
@@ -697,16 +694,21 @@ class MolecularFeaturizer:
         proteins = df[protein_col].values
 
         if encoding == "onehot":
+            # 向量化: 用 pd.Categorical 直接映射为整数索引
+            cat = pd.Categorical(
+                [str(p) for p in proteins],
+                categories=PROTEIN_NAMES,
+            )
             encoded = np.zeros((len(proteins), NUM_PROTEINS), dtype=np.float32)
-            for i, prot in enumerate(proteins):
-                idx = PROTEIN_TO_IDX.get(str(prot), -1)
-                if idx >= 0:
-                    encoded[i, idx] = 1.0
+            valid = cat.codes >= 0
+            encoded[valid, cat.codes[valid]] = 1.0
         elif encoding == "label":
-            encoded = np.zeros((len(proteins), 1), dtype=np.float32)
-            for i, prot in enumerate(proteins):
-                idx = PROTEIN_TO_IDX.get(str(prot), -1)
-                encoded[i, 0] = float(idx) if idx >= 0 else -1.0
+            # 向量化 one-hot 的子集转为单列标签
+            cat = pd.Categorical(
+                [str(p) for p in proteins],
+                categories=PROTEIN_NAMES,
+            )
+            encoded = cat.codes.astype(np.float32).reshape(-1, 1)
         else:
             raise ValueError(f"不支持的蛋白质编码方式: {encoding}")
 

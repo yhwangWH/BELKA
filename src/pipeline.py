@@ -196,9 +196,9 @@ class BELKAPipeline:
         X_test, test_ids, test_protein_labels = self._extract_test_features(df_test)
         _log_memory("测试集特征提取完成")
 
-        # 释放原始训练数据内存 (保留 df_sampled 供交叉验证分层用)
-        del df_train
-        _force_gc("释放 df_train")
+        # 释放原始训练数据和测试数据 (df_sampled 仍需供交叉验证分层)
+        del df_train, df_test
+        _force_gc("释放 df_train, df_test")
 
         # ---- Step 4: 交叉验证训练 ----
         print("\n" + "=" * 60)
@@ -241,12 +241,11 @@ class BELKAPipeline:
     def _load_train_data(self) -> pd.DataFrame:
         """加载训练数据 (快速模式用 CSV, 全量模式用 Parquet)."""
         if self.quick_mode:
-            # 快速模式: 从 train_300.csv 读取
-            csv_path = os.path.join(
-                os.path.dirname(os.path.dirname(__file__)), "data", "train_300.csv"
-            )
+            # 快速模式: 从 train_300.csv 读取 (使用 config.DATA_DIR)
+            from .config import DATA_DIR
+            csv_path = os.path.join(DATA_DIR, "train_300.csv")
             print(f"[Pipeline] 快速模式: 读取 {csv_path}")
-            df = pd.read_csv(csv_path)
+            df = pd.read_csv(csv_path, dtype={"binds": "int8"})
             # 模拟全量数据的内存优化
             from .data_loader import _optimize_dtypes
             df = _optimize_dtypes(df)
@@ -260,11 +259,9 @@ class BELKAPipeline:
         if self.quick_mode:
             # 快速模式: 用 train_300 的前 50 行模拟测试集
             print("[Pipeline] 快速模式: 使用训练数据前 50 行模拟测试集")
-            csv_path = os.path.join(
-                os.path.dirname(os.path.dirname(__file__)), "data", "train_300.csv"
-            )
-            df = pd.read_csv(csv_path, nrows=50)
-            # 测试集不应该有 binds 列, 但我们保留用于快速验证
+            from .config import DATA_DIR
+            csv_path = os.path.join(DATA_DIR, "train_300.csv")
+            df = pd.read_csv(csv_path, nrows=50, dtype={"binds": "int8"})
         else:
             df = load_test_data()
         return df
@@ -277,7 +274,7 @@ class BELKAPipeline:
         """执行分层采样."""
         if self.quick_mode:
             print("[Pipeline] 快速模式: 跳过采样 (数据量小)")
-            return df_train.copy()
+            return df_train  # 无需 copy, 调用方只读使用
 
         df_sampled = stratified_sample(df_train)
         return df_sampled
@@ -407,7 +404,7 @@ class BELKAPipeline:
             self.models.append(trainer)
 
             # 清理
-            del X_train, X_valid, y_train, y_valid
+            del X_train, X_valid, y_train, y_valid, prot_valid
             gc.collect()
 
         # 汇总交叉验证结果

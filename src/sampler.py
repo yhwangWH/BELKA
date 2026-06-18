@@ -70,12 +70,9 @@ def stratified_sample(
     """
     print(f"\n[Sampler] 分层采样: 正负比 1:{negative_ratio}")
 
-    # 1. 分离正负样本
-    pos_mask = df[label_col] == 1
-    neg_mask = ~pos_mask
-
-    pos_samples = df[pos_mask].copy()
-    neg_samples = df[neg_mask].copy()
+    # 1. 分离正负样本 (布尔索引已返回副本, 无需 .copy())
+    pos_samples = df[df[label_col] == 1]
+    neg_samples = df[df[label_col] == 0]
 
     print(f"  原始数据: {len(df):,} 行")
     print(f"    正样本: {len(pos_samples):,} ({100*len(pos_samples)/len(df):.4f}%)")
@@ -116,6 +113,10 @@ def stratified_sample(
 
     # 3. 合并并打乱
     sampled_df = pd.concat(sampled_chunks, axis=0, ignore_index=True)
+    # 释放中间采样缓冲, 避免 concat 期间峰值内存翻倍
+    del sampled_chunks, pos_samples, neg_samples
+    import gc
+    gc.collect()
     sampled_df = sampled_df.sample(frac=1, random_state=random_state).reset_index(
         drop=True
     )
