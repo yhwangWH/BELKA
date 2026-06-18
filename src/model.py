@@ -109,16 +109,18 @@ class LightGBMTrainer:
         -------
         self
         """
-        # 构建 LightGBM Dataset
+        # 构建 LightGBM Dataset (free_raw_data=True → 直接引用原数组, 不复制)
         dtrain = lgb.Dataset(
             X_train,
             label=y_train,
             categorical_feature=categorical_feature,
+            free_raw_data=True,
         )
         dvalid = lgb.Dataset(
             X_valid,
             label=y_valid,
             reference=dtrain,
+            free_raw_data=True,
         )
 
         # 训练参数

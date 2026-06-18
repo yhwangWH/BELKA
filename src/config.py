@@ -117,7 +117,7 @@ NUM_PROTEINS = len(PROTEIN_NAMES)
 # Morgan/ECFP4 指纹参数
 FINGERPRINT_TYPE = "morgan"          # 指纹类型: "morgan", "maccs", "both"
 MORGAN_RADIUS = 2                    # ECFP4 ~ Morgan radius=2
-MORGAN_NBITS = 1024                  # 指纹位数量 (降低以节省内存, 2048→1024)
+MORGAN_NBITS = 512                   # 指纹位数量 (降低以节省内存, 2048→1024→512)
 
 # MACCS Keys 指纹 (固定 167 位)
 MACCS_NBITS = 167
@@ -155,7 +155,9 @@ NEGATIVE_RATIO = 5                    # 曾为 20, 降为 5 以节省内存
 MAX_POSITIVE_SAMPLES = 150_000
 
 # 训练集总样本硬上限 (采样后不应超过此行数)
-MAX_TOTAL_TRAIN_SAMPLES = 3_000_000
+# 内存公式: rows × (512 morgan + 10 physchem + 3 protein) × 4 bytes = rows × 2100 bytes
+# 1.5M → ~3.1 GB disk (memmap), per-fold X_train ~2.5 GB → Kaggle 16GB 可承受
+MAX_TOTAL_TRAIN_SAMPLES = 1_500_000
 
 # 按 building blocks 抽样以保持化学多样性
 USE_CHEMICAL_DIVERSITY_SAMPLING = False  # 第一阶段先不用, 第二阶段实验

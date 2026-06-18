@@ -210,9 +210,9 @@ class BELKAPipeline:
         _log_memory("交叉验证前")
         self._run_cross_validation(X, y, protein_labels, df_sampled)
 
-        # 交叉验证完成后释放 df_sampled
-        del df_sampled
-        _force_gc("释放 df_sampled")
+        # 交叉验证完成后释放训练特征和 df_sampled
+        del df_sampled, X, y, protein_labels
+        _force_gc("释放训练特征 + df_sampled")
 
         # ---- Step 5: 测试集预测 ----
         print("\n" + "=" * 60)
@@ -406,6 +406,7 @@ class BELKAPipeline:
             # 清理
             del X_train, X_valid, y_train, y_valid, prot_valid
             gc.collect()
+            _log_memory(f"Fold {fold_i + 1} 完成")
 
         # 汇总交叉验证结果
         print_cv_summary(self.fold_metrics, label="Cross-Validation")
