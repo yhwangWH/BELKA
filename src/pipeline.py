@@ -23,6 +23,7 @@ import argparse
 import gc
 import time
 import os
+import psutil
 from datetime import datetime
 import numpy as np
 import pandas as pd
@@ -60,6 +61,26 @@ from .submission import (
     collect_oof_predictions,
     compute_oof_score,
 )
+
+
+# ============================================================================
+# 内存监控工具
+# ============================================================================
+
+def _log_memory(label: str = "") -> None:
+    """打印当前进程内存使用量 (MB), 用于 Kaggle 环境调试."""
+    try:
+        mem = psutil.Process().memory_info().rss / (1024 ** 2)
+        print(f"  [MEM] {label}: {mem:.0f} MB")
+    except Exception:
+        pass  # psutil 在某些环境不可用
+
+
+def _force_gc(reason: str = "") -> None:
+    """强制垃圾回收 + 内存日志."""
+    gc.collect()
+    if reason:
+        _log_memory(f"GC after: {reason}")
 
 
 class BELKAPipeline:
@@ -132,6 +153,7 @@ class BELKAPipeline:
 
         # ---- 确保输出目录存在 (Kaggle 环境下指向 /kaggle/working) ----
         ensure_output_dirs()
+        _log_memory("Pipeline 启动")
 
         # ---- Step 1: 加载数据 ----
         print("\n" + "=" * 60)
@@ -139,6 +161,7 @@ class BELKAPipeline:
         print("=" * 60)
 
         df_train = self._load_train_data()
+        _log_memory("Step 1: 训练数据加载完成")
         df_test = self._load_test_data()
 
         # ---- Step 2: 分层采样 (全量模式已在加载时完成) ----
@@ -162,17 +185,20 @@ class BELKAPipeline:
         print(f"  ⏳ 特征工程是最耗时的步骤, 请耐心等待进度输出...")
 
         t_feat = time.time()
+        _log_memory("特征提取前")
         X, y, protein_labels = self._extract_features(df_sampled)
         feat_elapsed = time.time() - t_feat
+        _log_memory("训练集特征提取完成")
         print(f"  [{datetime.now().strftime('%H:%M:%S')}] 训练集特征提取完成 "
               f"(耗时 {feat_elapsed:.1f}s)")
 
         print(f"\n  [{datetime.now().strftime('%H:%M:%S')}] 开始提取测试集特征...")
         X_test, test_ids, test_protein_labels = self._extract_test_features(df_test)
+        _log_memory("测试集特征提取完成")
 
         # 释放原始训练数据内存 (保留 df_sampled 供交叉验证分层用)
         del df_train
-        gc.collect()
+        _force_gc("释放 df_train")
 
         # ---- Step 4: 交叉验证训练 ----
         print("\n" + "=" * 60)
@@ -181,11 +207,12 @@ class BELKAPipeline:
         print(f"  [{datetime.now().strftime('%H:%M:%S')}] 开始 {N_FOLDS}-fold 交叉验证...")
         print(f"  每折训练约需数分钟, LightGBM 会每 {VERBOSE_EVAL} 轮打印一次 AUC\n")
 
+        _log_memory("交叉验证前")
         self._run_cross_validation(X, y, protein_labels, df_sampled)
 
         # 交叉验证完成后释放 df_sampled
         del df_sampled
-        gc.collect()
+        _force_gc("释放 df_sampled")
 
         # ---- Step 5: 测试集预测 ----
         print("\n" + "=" * 60)

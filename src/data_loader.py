@@ -21,6 +21,10 @@ from .config import (
     TRAIN_COLUMNS,
     TEST_COLUMNS,
     PROTEIN_NAMES,
+    NEGATIVE_RATIO,
+    MAX_POSITIVE_SAMPLES,
+    MAX_TOTAL_TRAIN_SAMPLES,
+    DATA_CHUNK_SIZE,
     RANDOM_SEED,
 )
 
@@ -111,6 +115,15 @@ def load_test_data(
     if nrows is not None:
         df = df.iloc[:nrows].copy()
         print(f"  只加载了前 {nrows} 行 (快速测试模式)")
+
+    # 测试集也需要内存优化
+    for col in df.select_dtypes(include=["int64"]).columns:
+        col_max = df[col].max()
+        if col_max < 2_147_483_648:
+            df[col] = df[col].astype("int32")
+    for col in df.columns:
+        if str(df[col].dtype) in ("string[pyarrow]", "object"):
+            df[col] = df[col].astype(str).astype("category")
 
     print(f"[DataLoader] 测试数据: {df.shape[0]:,} 行 × {df.shape[1]} 列")
     return df
@@ -214,49 +227,38 @@ def _optimize_dtypes(df: pd.DataFrame, convert_strings: bool = True) -> pd.DataF
 def load_and_sample_train_chunked(
     filepath: str = TRAIN_FILE,
     columns: Optional[List[str]] = None,
-    negative_ratio: int = 20,
-    chunk_size: int = 1_000_000,
+    negative_ratio: int = NEGATIVE_RATIO,
+    max_positive_per_protein: int = MAX_POSITIVE_SAMPLES,
+    max_total_samples: int = MAX_TOTAL_TRAIN_SAMPLES,
+    chunk_size: int = DATA_CHUNK_SIZE,
     random_state: int = RANDOM_SEED,
 ) -> pd.DataFrame:
     """
-    分块流式读取 Parquet, 边读边采样, 解决 2.95 亿行内存溢出问题.
+    分块流式读取 Parquet, 边读边采样, 定期合并缓冲避免 OOM.
 
-    策略:
-      1. 不一次性加载全量数据, 按 row_group (约100万行/块) 逐块读取.
-      2. 每块内: 保留全部正样本, 对负样本按比例随机采样.
-      3. 每处理完一块立即释放内存.
-      4. 最终合并所有块的正样本 + 采样的负样本.
-
-    这样可以:
-      - 峰值内存 ≈ 一块大小 + 最终采样后数据, 而非全量数据.
-      - 同时完成读取和采样, 避免两次遍历.
-
-    Parameters
-    ----------
-    filepath : str
-        训练数据 Parquet 路径.
-    columns : list of str, optional
-        需要读取的列.
-    negative_ratio : int
-        负样本对正样本的倍数.
-    chunk_size : int
-        每块行数 (建议 = Parquet row_group 大小).
-    random_state : int
-        随机种子.
+    关键改进 (v2):
+      - 每 merge_interval 个块合并一次缓冲区, 防止 pos_chunks/neg_chunks
+        列表无限膨胀 (原实现会累积全部 2.95 亿行的采样结果).
+      - 尊重 MAX_POSITIVE_SAMPLES 上限.
+      - 达到 MAX_TOTAL_TRAIN_SAMPLES 后提前退出.
 
     Returns
     -------
     sampled_df : pd.DataFrame
-        采样后的完整训练数据.
+        采样后的训练数据 (大小可控, ~百万行级别).
     """
     import pyarrow.parquet as pq
 
     if columns is None:
-        columns = TRAIN_COLUMNS + ["id"]  # 需要 id 用于去重
+        columns = TRAIN_COLUMNS
 
-    print(f"[DataLoader] 分块流式读取 + 采样: {filepath}")
+    merge_interval = 5  # 每 5 个 chunk (~10M 行) 合并一次缓冲区
+
+    print(f"[DataLoader] 分块流式读取 + 采样 (v2 内存优化): {filepath}")
     print(f"  负样本比例: 1:{negative_ratio}")
-    print(f"  块大小: {chunk_size:,} 行/块")
+    print(f"  每蛋白最大正样本: {max_positive_per_protein:,}")
+    print(f"  总样本硬上限: {max_total_samples:,}")
+    print(f"  块大小: {chunk_size:,} 行/块, 每 {merge_interval} 块合并缓冲")
 
     pf = pq.ParquetFile(filepath)
     total_rows = pf.metadata.num_rows
@@ -264,28 +266,27 @@ def load_and_sample_train_chunked(
 
     rng = np.random.RandomState(random_state)
 
-    # 缓冲区: 分别存储每个蛋白质的正/负样本
+    final_pos: List[pd.DataFrame] = []
+    final_neg: List[pd.DataFrame] = []
     pos_chunks: List[pd.DataFrame] = []
     neg_chunks: List[pd.DataFrame] = []
 
-    # 进度计数器
     n_processed = 0
     n_pos_found = 0
-    n_neg_kept = 0
     chunk_id = 0
+    early_stop = False
 
     for batch in pf.iter_batches(
         batch_size=chunk_size,
         columns=columns,
     ):
-        chunk_id += 1
-        # 将 PyArrow Table 转为 Pandas DataFrame
-        df_chunk = batch.to_pandas()
+        if early_stop:
+            break
 
-        # 块内只做数值类型优化 (整数/浮点), 跳过字符串→category (块内做代价大)
+        chunk_id += 1
+        df_chunk = batch.to_pandas()
         df_chunk = _optimize_dtypes(df_chunk, convert_strings=False)
 
-        # 分离当前块的正负样本
         pos_mask = df_chunk["binds"] == 1
         df_pos = df_chunk[pos_mask].copy()
         df_neg = df_chunk[~pos_mask].copy()
@@ -293,70 +294,122 @@ def load_and_sample_train_chunked(
         n_chunk_pos = len(df_pos)
         n_chunk_neg = len(df_neg)
 
-        # 保留全部正样本
         if n_chunk_pos > 0:
             pos_chunks.append(df_pos)
             n_pos_found += n_chunk_pos
 
-        # 对负样本按比例随机采样 (1:negative_ratio)
-        # 使用哈希采样法: 对每行生成随机数, 只保留前 N 个
         if n_chunk_neg > 0:
             target_neg = n_chunk_pos * negative_ratio
-
             if target_neg >= n_chunk_neg:
-                # 负样本不够, 全部保留
                 neg_chunks.append(df_neg)
-                n_neg_kept += n_chunk_neg
             else:
-                # 随机采样
                 chosen = rng.choice(n_chunk_neg, size=target_neg, replace=False)
-                df_neg_sampled = df_neg.iloc[chosen].copy()
-                neg_chunks.append(df_neg_sampled)
-                n_neg_kept += target_neg
-
-                del df_neg  # 释放未选中的负样本
+                neg_chunks.append(df_neg.iloc[chosen].copy())
+                del df_neg
                 gc.collect()
 
-        # 释放当前块
         del df_chunk, df_pos
         gc.collect()
-
         n_processed += batch.num_rows
 
-        # 每 10 个 chunk 打印一次进度
-        if chunk_id % 10 == 0:
+        # ---- 定期合并缓冲区, 防止内存膨胀 ----
+        if chunk_id % merge_interval == 0:
             pct = 100 * n_processed / total_rows
-            mem_mb = _estimate_current_memory(pos_chunks, neg_chunks)
+            buf_mb = _estimate_buf_memory(pos_chunks, neg_chunks)
             print(f"  进度: {n_processed / 1e6:.0f}M/{total_rows / 1e6:.0f}M "
-                  f"({pct:.1f}%) | 正样本累计: {n_pos_found:,} | "
-                  f"负样本保留: {n_neg_kept:,} | 内存: {mem_mb:.0f} MB")
+                  f"({pct:.1f}%) | 正: {n_pos_found:,} | 缓冲内存: {buf_mb:.0f} MB")
 
-    # 合并所有块
-    print(f"[DataLoader] 合并采样结果...")
-    all_pos = pd.concat(pos_chunks, axis=0, ignore_index=True) if pos_chunks else pd.DataFrame()
-    all_neg = pd.concat(neg_chunks, axis=0, ignore_index=True) if neg_chunks else pd.DataFrame()
+            _merge_buffers(pos_chunks, neg_chunks, final_pos, final_neg,
+                           max_positive_per_protein, random_state)
 
-    del pos_chunks, neg_chunks
+            total_so_far = sum(len(df) for df in final_pos) + sum(len(df) for df in final_neg)
+            if total_so_far >= max_total_samples:
+                print(f"  [DataLoader] 已达总样本上限 {max_total_samples:,}, 提前结束")
+                early_stop = True
+
+    # 处理残留块
+    _merge_buffers(pos_chunks, neg_chunks, final_pos, final_neg,
+                   max_positive_per_protein, random_state)
+
+    # 最终合并
+    print(f"[DataLoader] 最终合并 ({len(final_pos)} 正块 + {len(final_neg)} 负块)...")
+    all_pos = pd.concat(final_pos, axis=0, ignore_index=True) if final_pos else pd.DataFrame()
+    all_neg = pd.concat(final_neg, axis=0, ignore_index=True) if final_neg else pd.DataFrame()
+    del final_pos, final_neg, pos_chunks, neg_chunks
     gc.collect()
 
-    # 最终融合 + 打乱 + 完整内存优化
     sampled_df = pd.concat([all_pos, all_neg], axis=0, ignore_index=True)
-    sampled_df = _optimize_dtypes(sampled_df, convert_strings=True)  # 现在对合并数据做完整优化
+    del all_pos, all_neg
+    gc.collect()
+
+    sampled_df = _optimize_dtypes(sampled_df, convert_strings=True)
     sampled_df = sampled_df.sample(frac=1, random_state=random_state).reset_index(drop=True)
+
+    # 硬截断 (保险)
+    if len(sampled_df) > max_total_samples:
+        print(f"  [DataLoader] 硬截断: {len(sampled_df):,} → {max_total_samples:,}")
+        sampled_df = sampled_df.iloc[:max_total_samples].reset_index(drop=True)
 
     _print_data_info(sampled_df, label="采样后训练数据")
     return sampled_df
 
 
-def _estimate_current_memory(
+def _merge_buffers(
+    pos_chunks: list,
+    neg_chunks: list,
+    final_pos: list,
+    final_neg: list,
+    max_per_protein: int,
+    random_state: int,
+) -> None:
+    """合并当前缓冲窗口到最终存储, 并对正样本按蛋白质限流."""
+    if pos_chunks:
+        merged = pd.concat(pos_chunks, axis=0, ignore_index=True)
+        merged = _cap_positives_per_protein(merged, max_per_protein, random_state)
+        final_pos.append(merged)
+        pos_chunks.clear()
+    if neg_chunks:
+        final_neg.append(pd.concat(neg_chunks, axis=0, ignore_index=True))
+        neg_chunks.clear()
+    gc.collect()
+
+
+def _cap_positives_per_protein(
+    df: pd.DataFrame,
+    max_per_protein: int,
+    random_state: int,
+) -> pd.DataFrame:
+    """对每个蛋白质的正样本设上限, 超出部分随机丢弃."""
+    if len(df) == 0:
+        return df
+    capped = []
+    for prot in PROTEIN_NAMES:
+        sub = df[df["protein_name"] == prot]
+        if len(sub) > max_per_protein:
+            sub = sub.sample(n=max_per_protein, random_state=random_state)
+        if len(sub) > 0:
+            capped.append(sub)
+    result = pd.concat(capped, axis=0, ignore_index=True) if capped else df.iloc[:0].copy()
+    del capped
+    gc.collect()
+    return result
+
+
+def _estimate_buf_memory(
     pos_chunks: list, neg_chunks: list
 ) -> float:
-    """估算当前缓冲区内存占用 (MB)."""
+    """估算当前缓冲区内存占用 (MB) — 轻量化版本."""
     total = 0.0
-    for c in pos_chunks[-3:]:  # 只估算最近3个块, 避免遍历开销
-        total += c.memory_usage(deep=True).sum()
+    for c in pos_chunks[-3:]:
+        try:
+            total += c.memory_usage(deep=True).sum()
+        except Exception:
+            pass
     for c in neg_chunks[-3:]:
-        total += c.memory_usage(deep=True).sum()
+        try:
+            total += c.memory_usage(deep=True).sum()
+        except Exception:
+            pass
     return total / (1024**2)
 
 

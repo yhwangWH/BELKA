@@ -11,3 +11,4 @@ matplotlib>=3.7
 seaborn>=0.13
 tqdm>=4.66
 joblib>=1.3
+psutil>=5.9

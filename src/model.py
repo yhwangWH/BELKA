@@ -128,7 +128,7 @@ class LightGBMTrainer:
         # 类别不平衡处理:
         #   使用 scale_pos_weight 放大正样本权重 (~正负比倒数)
         #   注意: 不能同时使用 is_unbalance=True
-        fit_params.setdefault("scale_pos_weight", 200)
+        fit_params.setdefault("scale_pos_weight", 100)
         # 如果有 is_unbalance 则移除 (与 scale_pos_weight 互斥)
         fit_params.pop("is_unbalance", None)
 
@@ -376,7 +376,7 @@ def optimize_lgb_hyperparams(
                 LIGHTGBM_PARAM_SPACE["reg_lambda"][1],
                 log=True,
             ),
-            "scale_pos_weight": 200,
+            "scale_pos_weight": 100,
             "random_state": random_state,
             "n_jobs": -1,
             "verbosity": -1,

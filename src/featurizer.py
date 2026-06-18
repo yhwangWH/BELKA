@@ -49,13 +49,16 @@ class MolecularFeaturizer:
       - 将 SMILES 字符串解析为 RDKit Mol 对象
       - 计算 Morgan 指纹 / MACCS 指纹
       - 计算理化性质描述符
-      - 缓存已解析的分子以避免重复计算
+      - 缓存已解析的分子以避免重复计算 (有上限)
 
     Usage
     -----
     >>> featurizer = MolecularFeaturizer()
     >>> X = featurizer.fit_transform(df, protein_encoding="onehot")
     """
+
+    # 分子缓存硬上限 (Mol 对象每个约 1-5 KB, 10万限制 ≈ 500 MB 上限)
+    _MAX_CACHE_SIZE = 100_000
 
     def __init__(
         self,
@@ -85,8 +88,10 @@ class MolecularFeaturizer:
         self.use_physicochemical = use_physicochemical
         self.cache_mols = cache_mols
 
-        # 分子缓存: {smiles: RDKit Mol}
+        # 分子缓存: {smiles: RDKit Mol} (有大小上限)
         self._mol_cache: Dict[str, Optional[Chem.Mol]] = {}
+        self._cache_hits: int = 0
+        self._cache_misses: int = 0
 
         # 特征维度信息 (在第一次 fit_transform 后填充)
         self.feature_names_: List[str] = []
@@ -409,8 +414,13 @@ class MolecularFeaturizer:
 
     def clear_cache(self) -> None:
         """清除分子缓存以释放内存."""
+        cache_size = len(self._mol_cache)
         self._mol_cache.clear()
+        self._cache_hits = 0
+        self._cache_misses = 0
         gc.collect()
+        if cache_size > 0:
+            print(f"  [Featurizer] 已清除 {cache_size:,} 个分子缓存")
 
     # -----------------------------------------------------------------
     # 内部: SMILES → RDKit Mol
@@ -418,7 +428,7 @@ class MolecularFeaturizer:
 
     def _smiles_to_mol(self, smiles: str) -> Optional[Chem.Mol]:
         """
-        将 SMILES 字符串解析为 RDKit Mol 对象.
+        将 SMILES 字符串解析为 RDKit Mol 对象 (带缓存上限).
 
         Parameters
         ----------
@@ -431,15 +441,22 @@ class MolecularFeaturizer:
             解析成功返回 Mol 对象, 失败返回 None.
         """
         if smiles in self._mol_cache:
+            self._cache_hits += 1
             return self._mol_cache[smiles]
+
+        self._cache_misses += 1
 
         if not isinstance(smiles, str) or not smiles:
             mol = None
         else:
             mol = Chem.MolFromSmiles(smiles)
             if mol is not None:
-                # 添加氢原子用于准确的指纹计算 (Morgan 指纹推荐)
                 mol = Chem.AddHs(mol)
+
+        # 缓存上限控制: 超过上限则清空一半
+        if self.cache_mols and len(self._mol_cache) >= self._MAX_CACHE_SIZE:
+            items = list(self._mol_cache.items())
+            self._mol_cache = dict(items[len(items) // 2:])
 
         if self.cache_mols:
             self._mol_cache[smiles] = mol
@@ -512,6 +529,12 @@ class MolecularFeaturizer:
         if n_errors > 0:
             print(f"  [Featurizer] ⚠ 警告: {n_errors} 个 SMILES 解析失败 "
                   f"({100 * n_errors / n_samples:.2f}%)")
+
+        # 打印缓存统计
+        if self._cache_hits + self._cache_misses > 0:
+            hit_rate = 100 * self._cache_hits / (self._cache_hits + self._cache_misses)
+            print(f"  [Featurizer] Mol 缓存: {len(self._mol_cache):,} 条目, "
+                  f"命中率 {hit_rate:.1f}%")
 
         # 释放 Mol 缓存
         self.clear_cache()
